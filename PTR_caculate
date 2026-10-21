@@ -1,0 +1,202 @@
+#!/bin/bash
+
+# Initialize parameters
+Clean_data=""
+BINs=""
+Output=""
+Threads=""
+
+# Display usage information
+function display_usage {
+    echo "Usage: $0 --clean_data <Clean_data_path> --bins <BINs_path> --output <Output_path> --threads <Thread_count>"
+    echo "Options:"
+    echo "  --clean_data    Path to clean data"
+    echo "  --bins          Path to BINs"
+    echo "  --output        Output path. If not provided, it will default to the same path as --bins."
+    echo "  --threads       Number of threads"
+}
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    key="$1"
+    case $key in
+        --clean_data)
+        Clean_data="$2"
+        shift
+        shift
+        ;;
+        --bins)
+        BINs="$2"
+        Output="$2"  # 如果 --output 为空，则设置为与 --bins 相同的值
+        shift
+        shift
+        ;;
+        --output)
+        Output="$2"
+        shift
+        shift
+        ;;
+        --threads)
+        Threads="$2"
+        shift
+        shift
+        ;;
+        *)
+        echo "Unknown option: $1"
+        display_usage
+        exit 1
+        ;;
+    esac
+done
+
+
+# Check if required parameters are empty
+if [ -z "$Clean_data" ] || [ -z "$BINs" ] || [ -z "$Output" ] || [ -z "$Threads" ]; then
+    echo "Missing required parameters."
+    display_usage
+    exit 1
+fi
+
+# 设置其他变量
+#GrowthRate_RESULTS="${Output}"
+slice_bam_by_contigs="/home/dyj/metagenome/PTR/slice_bam_by_contigs.sh"
+slice_bam_by_insert_size="/home/dyj/metagenome/PTR/slice_bam_by_insert_size.py"
+#demic="/home/gao_d2/scripts/Gri/DEMIC3.pl"
+
+source /software1/etc/profile.d/conda.sh
+conda activate qiime1
+conda info --envs
+
+insert_min=0
+insert_max=1000
+
+# 获取所有 .fa 文件
+fa_files=(${BINs}/*.fa)
+total_fa_files=${#fa_files[@]}
+# 定义一个数组来存储已经处理过的编号
+processed1=()
+# 主循环，处理每个 bin 文件
+for ((i=$total_fa_files-1; i>=0; i--)); do
+    processed2=()  # 重置 processed2 数组
+    bin=${fa_files[$i]}
+    BIN_BASENAME=$(basename $bin)
+    BIN_FILESTEM=${BIN_BASENAME%.fa}
+    
+    # 剩余的文件数
+     remaining_fa_files=$((total_fa_files - i - 1))  # 计算剩余文件数，当前i的倒数就是剩余文件数
+    
+    # 报告当前处理的文件和剩余的文件
+    echo "#################################################################################################################################################################################################################"
+    echo "Processing file $((i+1)) of $total_fa_files: $BIN_BASENAME"
+    echo "$remaining_fa_files files remaining."
+    # 检查目录是否已经存在，如果存在则跳过当前处理
+    if [ -d "${Output}/bam_files/${BIN_FILESTEM}_bam" ]; then
+    echo "Directory ${Output}/bam_files/${BIN_FILESTEM}_bam already exists. Skipping this bin."
+    continue # 跳过当前循环，处理下一个 bin 文件
+    fi
+
+    mkdir -p ${Output}/bam_files/"${BIN_FILESTEM}_bam"
+    cp -n ${BINs}/"$BIN_BASENAME" ${Output}/bam_files/"${BIN_FILESTEM}_bam"
+    cd ${Output}/bam_files/"${BIN_FILESTEM}_bam"
+
+    echo "######################################################################################################################################################################################################################"
+    echo "Building Bowtie2 index for $BIN_BASENAME"
+    bowtie2-build -f "$BIN_BASENAME" ref
+
+    # 处理每个 fastq 样品
+    for sample in ${BINs}/*.fastq; do 
+        SAMPLE_BASENAME=$(basename $sample)
+        SAMPLE_FILESTEM=${SAMPLE_BASENAME%.fastq}
+        SAMPLE=$(echo "$SAMPLE_FILESTEM" | cut -d'_' -f1)
+
+        echo "Processing sample: $SAMPLE"
+
+            for clean in ${Clean_data}/*.fastq; do 
+                CLEAN_BASENAME=$(basename $clean)
+                CLEAN_FILESTEM=${CLEAN_BASENAME%.fastq}
+                CLEAN_SINGLE=$(echo "$CLEAN_FILESTEM" | cut -d'_' -f1)
+
+                if [[ ! " ${processed2[@]} " =~ " $CLEAN_SINGLE " ]]; then  # 检查是否已经处理过这个编号
+                 echo "#################################################################################################################################################################################################################"
+                    echo "Processing clean_data: $CLEAN_SINGLE"
+                    processed2+=("$CLEAN_SINGLE")  # 添加到已处理数组
+
+                    echo "Aligning with Bowtie2 and sorting BAM file"
+                    bowtie2 -p "$Threads" -x ref -1 ${Clean_data}/"$CLEAN_SINGLE"_1.fastq -2 ${Clean_data}/"$CLEAN_SINGLE"_2.fastq | \
+                    samtools sort -O bam -@ "$Threads" -o "${Output}/bam_files/${BIN_FILESTEM}_bam/${BIN_FILESTEM}_${CLEAN_SINGLE}.bam"
+
+                    # 进行切片
+                    BAM_FILE="${Output}/bam_files/${BIN_FILESTEM}_bam/${BIN_FILESTEM}_${CLEAN_SINGLE}.bam"
+                     echo "#################################################################################################################################################################################################################"
+                    echo "Slicing BAM file with contig $bin"
+                    $slice_bam_by_contigs -b "$BAM_FILE" -c "$bin" -o "${Output}/bam_files/${BIN_FILESTEM}_bam" -p "${BIN_FILESTEM}_${CLEAN_SINGLE}_slice"
+
+                    # 计算覆盖率
+                    # echo "#################################################################################################################################################################################################################"
+                    # echo "Calculating coverage for ${CLEAN_SINGLE}"
+                    # /home/gao_d2/scripts/bamcov/bamcov/bamcov --output "${Output}/bam_files/${BIN_FILESTEM}_bam/${CLEAN_SINGLE}_bamcov.tsv" --min-read-len 30 --min-BQ 0 "${Output}/bam_files/${BIN_FILESTEM}_bam/${CLEAN_SINGLE}_slice.bam"
+
+                    # 切片 BAM 记录，插入大小在指定范围内
+                     echo "#################################################################################################################################################################################################################"
+                    echo "Slicing BAM records with insert size between ${insert_min} and ${insert_max}"
+                    python $slice_bam_by_insert_size "${Output}/bam_files/${BIN_FILESTEM}_bam/${BIN_FILESTEM}_${CLEAN_SINGLE}_slice.bam" --force -a ${insert_min} -b ${insert_max} -u -o "${Output}/sam_files/${BIN_FILESTEM}" -p "${BIN_FILESTEM}_${CLEAN_SINGLE}"
+                    # 删除不再需要的 BAM 文件
+                    echo " rm -f "${Output}/bam_files/${BIN_FILESTEM}_bam/${BIN_FILESTEM}_${CLEAN_SINGLE}.bam" "
+                    echo " rm -f "${Output}/bam_files/${BIN_FILESTEM}_bam/${BIN_FILESTEM}_${CLEAN_SINGLE}_slice.bam" "
+                    rm -f "${Output}/bam_files/${BIN_FILESTEM}_bam/${BIN_FILESTEM}_${CLEAN_SINGLE}.bam"
+                    rm -f "${Output}/bam_files/${BIN_FILESTEM}_bam/${BIN_FILESTEM}_${CLEAN_SINGLE}_slice.bam"
+                fi
+            done
+       
+    done
+done
+
+# 后续处理代码
+iRep_RESULTS=${Output}/iRep_out
+GRiD_RESULTS=${Output}/GRiD_out
+#DEMIC_RESULTS=${Output}/DEMIC_out
+mkdir -p ${iRep_RESULTS}
+mkdir -p ${GRiD_RESULTS}
+#mkdir -p ${DEMIC_RESULTS}
+
+
+for dir in $(ls -d ${Output}/bam_files/*/); do
+    # 处理每个文件夹
+    echo "Processing directory: $dir"
+    DIR_BASENAME=$(basename $dir)
+
+    # 去掉 _bam 后缀
+    SAM_FILE_PREFIX=${DIR_BASENAME%_bam}
+
+    input_bam_dir="${Output}/bam_files/${DIR_BASENAME}"
+    bam_files=(${input_bam_dir}/*.bam)
+    Bin2Bam_RESULTS="${Output}/bam_files/${DIR_BASENAME}"
+    Bin2Sam_RESULTS="${Output}/sam_files/${SAM_FILE_PREFIX}"  # 生成正确的路径
+    HQ_BINs="${Output}/bam_files/${DIR_BASENAME}"  # 保留用于后续处理
+
+    conda activate grid2
+    conda info --envs
+
+    # 计算 iRep for each bin
+    echo "iRep -f ${HQ_BINs}/*.fa -s ${Bin2Sam_RESULTS}/*.sam -o ${iRep_RESULTS}/${DIR_BASENAME}"
+    iRep -f ${HQ_BINs}/*.fa -s ${Bin2Sam_RESULTS}/*.sam -o ${iRep_RESULTS}/${DIR_BASENAME} -ff
+
+    # 计算 GRiD for each bin
+    GRiD_DIR=${GRiD_RESULTS}/${DIR_BASENAME} 
+    echo "grid single -r ${Bin2Sam_RESULTS} -e sam -o ${GRiD_DIR} -g ${HQ_BINs}/*.fa -n ${Threads}"
+    grid single -r ${Bin2Sam_RESULTS} -e sam -o ${GRiD_DIR} -g ${HQ_BINs}/*.fa -n ${Threads}
+
+
+
+    conda activate qiime1 # 回到原来的环境
+done
+
+
+# 组合结果文件
+cd "${Output}"
+cat ${iRep_RESULTS}/*.tsv >> iRep_RESULTS.txt
+find ${Output}/GRiD_out -name "*.txt" -exec cat {} + > GRiD_RESULTS.txt
+#find ${Output}/DEMIC_out -name "*ptr.txt" -exec cat {} + > DEMIC_RESULTS.txt 
+rm -r ${Output}//bam_files
+echo "[INFO] done!"
+#conda deactivate
