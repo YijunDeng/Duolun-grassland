@@ -1,0 +1,119 @@
+#!/usr/bin/env python 
+
+
+# Copyright (C) 2019  Shengwei Hou: housw2010@gmail.com
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+
+import os
+import sys
+import time
+import pysam
+import argparse
+import tempfile
+from collections import OrderedDict
+
+
+def slice_bam_by_insert_size(bam_file, output_file, range=[200, 1000], memory='10G'):
+    """ slice bam file to get records with an insert size within given range
+    """
+
+    if not os.path.exists(bam_file+".bai"):
+        pysam.index(bam_file)
+
+    tmp_file="tmp_{t}".format(t=str(time.time()))
+    samfile = pysam.AlignmentFile(bam_file, "rb")
+    
+    # get sliced records and contig names
+    sliced_records = OrderedDict() #{contig:[records]} 
+    for rec in samfile.fetch():
+        if rec.is_paired:
+            if abs(rec.tlen) >= range[0] and abs(rec.tlen) <= range[1]:
+                if rec.reference_name in sliced_records:
+                    sliced_records[rec.reference_name].append(rec)
+                else:
+                    sliced_records[rec.reference_name] = [rec]
+
+    # get contig order, to assign reference_id and next_reference_id for each alignment
+    contig_order_dict = {}
+    for i, contig in enumerate(sliced_records.keys()):
+        contig_order_dict[contig] = i
+
+    # make a new sam header with sliced contig names
+    sam_header = {'HD': samfile.header['HD'], 
+                  'PG': samfile.header['PG'],
+                  'SQ': []}
+    for LN_SN_dict in samfile.header['SQ']:
+        if LN_SN_dict['SN'] in sliced_records:
+            sam_header['SQ'].append(LN_SN_dict)
+    #print(sam_header)
+
+    # write sliced sam records, remember to change the reference_id and next_reference_id
+    slice_samfile = pysam.AlignmentFile(tmp_file, "w", header=sam_header)
+    for contig, records in sliced_records.items():
+        for rec in records:
+            rec.reference_id = contig_order_dict.get(rec.reference_name, None)
+            rec.next_reference_id = contig_order_dict.get(rec.next_reference_name, rec.reference_id)
+            slice_samfile.write(rec)
+    slice_samfile.close()
+    samfile.close()
+    
+    #pysam.sort("-m", memory, "-o", output_file, tmp_file) 
+    pysam.sort("-o", output_file, tmp_file)
+    os.remove(tmp_file)
+
+
+def main():
+
+
+    # main parser
+    parser = argparse.ArgumentParser(description="parse bam files, filter records by insert sizes")
+    parser.add_argument('input_bam_file', help='input bam file')
+    parser.add_argument('-a', "--minimum_size", type=int, default=200,
+                        help="minimum insert size [default=200]")
+    parser.add_argument('-b', "--maximum_size", type=int, default=1000,
+                        help="maximum insert size [default=1000]")
+    parser.add_argument('-u', '--include_unpaired', action="store_true", help="include reads that are not pairly aligned")
+    parser.add_argument("-p", "--prefix", help="output prefix")
+    parser.add_argument("-o", "--output_dir", help="output directory, default=./", default="./")
+    parser.add_argument("-f", "--force", action="store_true", help="force to overwrite the output file")
+    parser.add_argument("-v", "--version", action="version", version="%(prog)s 1.0")
+    if len(sys.argv) < 2:
+        sys.stderr.write("\nERROR: Not enough parameters were provided, please refer to the usage.\n")
+        sys.stderr.write(parser.format_help())
+        sys.exit(1)
+
+    args = parser.parse_args()
+
+    # input and output handeling
+    if not os.path.exists(args.output_dir):
+        os.makedirs(args.output_dir)
+    if not args.prefix:
+        basename = os.path.basename(args.input_bam_file)
+        args.prefix = os.path.splitext(basename)[0]
+    out_file = os.path.join(args.output_dir, args.prefix+"_a{a}_b{b}.sam".format(a=args.minimum_size, b=args.maximum_size))
+    if os.path.exists(out_file):
+        if args.force:
+            print("Warning: output file exists, will be overwriten!")
+        else:
+            print("Error: output file detected, please backup it at first")
+            sys.exit(0)
+
+    # slice bam 
+    slice_bam_by_insert_size(args.input_bam_file, out_file, range=[args.minimum_size, args.maximum_size])
+
+
+if __name__ == "__main__":
+    main()
